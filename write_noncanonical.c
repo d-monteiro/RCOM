@@ -142,9 +142,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    
-
-    printf("%d bytes written\n", bytes);
 
     // Wait until all bytes have been written to the serial port
     sleep(1);
