@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
-#include <signal.h>
 
 // Baudrate settings are defined in <asm/termbits.h>, which is
 // included by <termios.h>
@@ -24,24 +23,29 @@
 
 volatile int STOP = FALSE;
 
-int alarmEnabled = FALSE;
-int alarmCount = 0;
+volatile int AlarmEnabled = 0;
+volatile int AlarmCount = 0;
 
 void alarmHandler(int signal)
 {
-    alarmEnabled = FALSE;
-    alarmCount++;
-
-    printf("Alarm #%d received\n", alarmCount);
+// Can be used to change a flag that increases the number of alarms
+alarmEnabled = FALSE;
+alarmCount++;
+printf("Alarm #%d received\n", alarmCount);
 }
+
 
 int main(int argc, char *argv[])
 {
+    struct sigaction act = {0};
+act.sa_handler = &alarmHandler;
+if (sigaction(SIGALRM, &act, NULL) == -1)
+{
+perror("sigaction");
+exit(1);
+}
     // Program usage: Uses either COM1 or COM2
     const char *serialPortName = argv[1];
-
-    struct sigaction act = {0};
-    act.sa_handler = &alarmHandler;
 
     if (argc < 2)
     {
@@ -62,14 +66,6 @@ int main(int argc, char *argv[])
         perror(serialPortName);
         exit(-1);
     }
-
-    if (sigaction(SIGALRM, &act, NULL) == -1)
-    {
-        perror("sigaction");
-        exit(1);
-    }
-
-    printf("Alarm configured\n");
 
     struct termios oldtio;
     struct termios newtio;
@@ -117,7 +113,7 @@ int main(int argc, char *argv[])
 
     for (int i = 0; i < BUF_SIZE; i++)
     {
-        buf[i] = 'a' + i % 26; 
+        buf[i] = 'a' + i % 26;
     }
 
     // In non-canonical mode, '\n' does not end the writing.
@@ -125,23 +121,8 @@ int main(int argc, char *argv[])
     // The whole buffer must be sent even with the '\n'.
     buf[5] = '\n';
 
-    for (int i = 0; i < BUF_SIZE; i++)
-    {
-        printf("buf = 0x%02X\n", buf[i]);
-    }
-
-    while (alarmCount < 4)
-    {
-        int bytes = write(fd, buf, BUF_SIZE);
-        int ua = read(fd, buf, BUF_SIZE);
-
-        if (ua == -1)
-        {
-            alarm(3); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
-        }
-    }
-
+    int bytes = write(fd, buf, BUF_SIZE);
+    printf("%d bytes written\n", bytes);
 
     // Wait until all bytes have been written to the serial port
     sleep(1);

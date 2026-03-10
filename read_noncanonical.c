@@ -19,6 +19,24 @@
 #define FALSE 0
 #define TRUE 1
 
+int alarmEnabled = FALSE;
+int alarmCount = 0;
+
+unsigned char byte;
+unsigned char A;
+unsigned char C;
+
+enum State state = START;
+enum State {
+    START,
+    FLAG_RCV,
+    A_RCV,
+    C_RCV,
+    BCC_OK,
+    STOP,
+    Other_RCV
+}
+
 #define BUF_SIZE 256
 
 volatile int STOP = FALSE;
@@ -67,7 +85,7 @@ int main(int argc, char *argv[])
     // Set input mode (non-canonical, no echo,...)
     newtio.c_lflag = 0;
     newtio.c_cc[VTIME] = 0; // Inter-character timer unused
-    newtio.c_cc[VMIN] = 5;  // Blocking read until 5 chars received
+    newtio.c_cc[VMIN] = 1;  // Blocking read until 5 chars received
 
     // VTIME e VMIN should be changed in order to protect with a
     // timeout the reception of the following character(s)
@@ -102,6 +120,78 @@ int main(int argc, char *argv[])
             STOP = TRUE;
     }
 
+switch(state){
+
+    case START:
+        
+        if(byte == FLAG_RCV){
+        state = FLAG_RCV;
+        }
+
+        if(byte == Other_RCV)
+          state = START;
+        
+        break;
+
+    case FLAG_RCV:
+        
+        if(byte == A_RCV){
+            state = A_RCV;
+        }
+        
+        if(byte == Other_RCV){
+            state = START;
+        }
+
+        if(byte == FLAG_RCV){
+            state = FLAG_RCV;
+        }
+
+        break;
+        
+    case A_RCV: 
+        
+        if(byte == FLAG_RCV){
+        state = FLAG_RCV;
+        }
+        
+        if(byte == Other_RCV){
+        state = START;
+        }
+        
+        if(byte == C_RCV){
+        state = C_RCV;
+        
+        break;
+
+    case C_RCV:
+        
+        if(byte == FLAG_RCV){
+        state = FLAG_RCV;
+        }
+
+        if(byte == A^C){
+        state = BCC_OK;
+        }
+
+        if(byte == Other_RCV){
+        state = START;
+        }
+    
+    case BCC_OK:
+
+        if(byte == Other_RCV){
+        state = START;
+        }
+
+        if(byte == FLAG_RCV){
+        state = STOP;
+        }
+
+        break;
+
+    }
+}
     // The while() cycle should be changed in order to respect the specifications
     // of the protocol indicated in the Lab guide
 
