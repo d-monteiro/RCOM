@@ -1,17 +1,15 @@
 CC = gcc
-CFLAGS =
+CFLAGS = -Wall -Iinclude
 BIN = bin
+SRC = src
 
-all: $(BIN)/write $(BIN)/read $(BIN)/cable
+all: $(BIN)/main $(BIN)/cable
 
 $(BIN):
 	mkdir -p $(BIN)
 
-$(BIN)/write: write_noncanonical.c | $(BIN)
-	$(CC) $(CFLAGS) -o $@ $<
-
-$(BIN)/read: read_noncanonical.c | $(BIN)
-	$(CC) $(CFLAGS) -o $@ $<
+$(BIN)/main: $(SRC)/main.c $(SRC)/link_layer.c $(SRC)/application.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^
 
 $(BIN)/cable: cable.c | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $<
