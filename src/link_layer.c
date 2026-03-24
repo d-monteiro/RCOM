@@ -81,6 +81,113 @@ int llopen(LinkLayer connectionParameters) {
 
     printf("DLL configured\n");
 
+    if (connectionParameters.role == tx) {
+        // Montar trama SET
+        unsigned char set_frame[5] = {FLAG, A_TX, C_SET, A_TX ^ C_SET, FLAG};
+
+        // State machine states
+        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state = START;
+
+        alarmCount = 0;
+
+        while (alarmCount < connectionParameters.nRetransmissions && state != STOP) {
+            // Enviar SET
+            write(fd, set_frame, 5);
+            printf("SET sent (%d/%d)\n", alarmCount + 1, connectionParameters.nRetransmissions);
+
+            // Ativar alarme
+            alarmEnabled = 1;
+            alarm(connectionParameters.timeout);
+
+            // Ler UA byte a byte com state machine
+            unsigned char byte;
+            while (alarmEnabled && state != STOP) {
+                int res = read(fd, &byte, 1);
+                if (res <= 0) continue;
+
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == A_TX) state = A_RCV;
+                        else if (byte != FLAG) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == C_UA) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (A_TX ^ C_UA)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) state = STOP;
+                        else state = START;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        alarm(0); // Cancelar alarme pendente
+
+        if (state != STOP) {
+            printf("ERROR: UA not received after %d retransmissions\n", connectionParameters.nRetransmissions);
+            return -1;
+        }
+
+        printf("UA received - connection established\n");
+    }
+
+    else {
+        // Esperar trama SET com state machine
+        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state = START;
+        unsigned char byte;
+
+        while (state != STOP) {
+            int res = read(fd, &byte, 1);
+            if (res <= 0) continue;
+
+            switch (state) {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == A_TX) state = A_RCV;
+                    else if (byte != FLAG) state = START;
+                    break;
+                case A_RCV:
+                    if (byte == C_SET) state = C_RCV;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case C_RCV:
+                    if (byte == (A_TX ^ C_SET)) state = BCC_OK;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) state = STOP;
+                    else state = START;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        printf("SET received\n");
+
+        // Enviar UA
+        unsigned char ua_frame[5] = {FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG};
+        write(fd, ua_frame, 5);
+
+        printf("UA sent - connection established\n");
+    }
+
     return fd;
 }
 
