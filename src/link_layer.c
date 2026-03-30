@@ -8,6 +8,12 @@
 #include <termios.h>
 #include <unistd.h>
 
+static int g_fd = -1;
+static LLRole g_role;
+static struct termios oldtio;
+static int g_timeout = 3;
+static int g_nRetransmissions = 3;
+
 // Alarm
 static int alarmEnabled = 0;
 static int alarmCount = 0;
@@ -18,6 +24,10 @@ static void alarmHandler(int signal) {
 }
 
 int llopen(LinkLayer connectionParameters) {
+    g_role = connectionParameters.role;
+    g_timeout = connectionParameters.timeout;
+    g_nRetransmissions = connectionParameters.nRetransmissions;
+
     // TODO: abrir porta serie, configurar termios
     // TODO: Tx -> envia SET, espera UA (com timer)
     // TODO: Rx -> espera SET, envia UA
@@ -25,7 +35,6 @@ int llopen(LinkLayer connectionParameters) {
     // Alarm setup
     struct sigaction act = {0};
     act.sa_handler = &alarmHandler;
-
 
     // Open serial port device for reading and writing, and not as controlling tty
     // because we don't want to get killed if linenoise sends CTRL-C.
@@ -40,19 +49,22 @@ int llopen(LinkLayer connectionParameters) {
     if (sigaction(SIGALRM, &act, NULL) == -1)
     {
         perror("sigaction");
+        close(fd);
         return -1;
     }
 
     struct termios newtio;
 
-    
+    // Save current serial port settings so we can restore them later
+    if (tcgetattr(fd, &oldtio) == -1) {
+        perror("tcgetattr");
+        close(fd);
+        return -1;
+    }
 
     // Clear struct for new port settings
     memset(&newtio, 0, sizeof(newtio));
 
-    
-
-    
     newtio.c_cflag = B38400 | CS8 | CLOCAL | CREAD;
     newtio.c_iflag = IGNPAR;
     newtio.c_oflag = 0;
@@ -60,7 +72,7 @@ int llopen(LinkLayer connectionParameters) {
     // Set input mode (non-canonical, no echo,...)
     newtio.c_lflag = 0;
     newtio.c_cc[VTIME] = 0; // Inter-character timer unused
-    newtio.c_cc[VMIN] = 0;  // Blocking read until 1 chars received
+    newtio.c_cc[VMIN] = 0;  // Read without blocking
 
     // VTIME e VMIN should be changed in order to protect with a
     // timeout the reception of the following character(s)
@@ -71,13 +83,16 @@ int llopen(LinkLayer connectionParameters) {
     // depending on the value of queue_selector:
     //   TCIFLUSH - flushes data received but not read.
     tcflush(fd, TCIOFLUSH);
-    
+
     // Set new port settings
     if (tcsetattr(fd, TCSANOW, &newtio) == -1)
     {
         perror("tcsetattr");
+        close(fd);
         return -1;
     }
+
+    g_fd = fd;
 
     printf("DLL configured\n");
 
@@ -86,11 +101,13 @@ int llopen(LinkLayer connectionParameters) {
         unsigned char set_frame[5] = {FLAG, A_TX, C_SET, A_TX ^ C_SET, FLAG};
 
         // State machine states
-        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state = START;
+        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state;
 
         alarmCount = 0;
 
-        while (alarmCount < connectionParameters.nRetransmissions && state != STOP) {
+        while (alarmCount < connectionParameters.nRetransmissions) {
+            state = START;
+
             // Enviar SET
             write(fd, set_frame, 5);
             printf("SET sent (%d/%d)\n", alarmCount + 1, connectionParameters.nRetransmissions);
@@ -109,38 +126,46 @@ int llopen(LinkLayer connectionParameters) {
                     case START:
                         if (byte == FLAG) state = FLAG_RCV;
                         break;
+
                     case FLAG_RCV:
                         if (byte == A_TX) state = A_RCV;
-                        else if (byte != FLAG) state = START;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
                         break;
+
                     case A_RCV:
                         if (byte == C_UA) state = C_RCV;
                         else if (byte == FLAG) state = FLAG_RCV;
                         else state = START;
                         break;
+
                     case C_RCV:
                         if (byte == (A_TX ^ C_UA)) state = BCC_OK;
                         else if (byte == FLAG) state = FLAG_RCV;
                         else state = START;
                         break;
+
                     case BCC_OK:
                         if (byte == FLAG) state = STOP;
                         else state = START;
                         break;
+
                     default:
                         break;
                 }
             }
+
+            alarm(0);
+
+            if (state == STOP) {
+                printf("UA received - connection established\n");
+                return fd;
+            }
         }
 
-        alarm(0); // Cancelar alarme pendente
-
-        if (state != STOP) {
-            printf("ERROR: UA not received after %d retransmissions\n", connectionParameters.nRetransmissions);
-            return -1;
-        }
-
-        printf("UA received - connection established\n");
+        printf("ERROR: UA not received after %d retransmissions\n",
+               connectionParameters.nRetransmissions);
+        return -1;
     }
 
     else {
@@ -156,24 +181,30 @@ int llopen(LinkLayer connectionParameters) {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
                     break;
+
                 case FLAG_RCV:
                     if (byte == A_TX) state = A_RCV;
-                    else if (byte != FLAG) state = START;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
                     break;
+
                 case A_RCV:
                     if (byte == C_SET) state = C_RCV;
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
                     break;
+
                 case C_RCV:
                     if (byte == (A_TX ^ C_SET)) state = BCC_OK;
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
                     break;
+
                 case BCC_OK:
                     if (byte == FLAG) state = STOP;
                     else state = START;
                     break;
+
                 default:
                     break;
             }
@@ -186,14 +217,111 @@ int llopen(LinkLayer connectionParameters) {
         write(fd, ua_frame, 5);
 
         printf("UA sent - connection established\n");
+        return fd;
     }
-
-    return fd;
 }
 
+  
 int llwrite(const unsigned char *buf, int bufSize) {
     // TODO: construir frame I (header + stuffing + BCC2)
-    // TODO: enviar frame, esperar RR/REJ (com timer + retransmissoes)
+    // TODO: enviar frame, esperar RR/REJ (com timer + retransmissoes) 
+    if (g_fd < 0) return -1;
+
+    unsigned char frame[2048];
+    int frameSize = 0;
+
+    unsigned char byte;
+    unsigned char control = 0;
+    int state;
+
+    // === HEADER ===
+    frame[frameSize++] = FLAG;
+    frame[frameSize++] = A_TX;
+    frame[frameSize++] = C_I0;          // por agora envia sempre I0
+    frame[frameSize++] = A_TX ^ C_I0;   // BCC1
+
+    // === DATA + BCC2 ===
+    unsigned char bcc2 = 0;
+    for (int i = 0; i < bufSize; i++) {
+        frame[frameSize++] = buf[i];
+        bcc2 ^= buf[i];
+    }
+
+    frame[frameSize++] = bcc2;
+
+    // === END FLAG ===
+    frame[frameSize++] = FLAG;
+
+    alarmCount = 0;
+
+    while (alarmCount < g_nRetransmissions) {
+        // enviar frame I
+        write(g_fd, frame, frameSize);
+        printf("I frame sent (%d/%d)\n", alarmCount + 1, g_nRetransmissions);
+
+        alarmEnabled = 1;
+        alarm(g_timeout);
+
+        state = 0;
+        control = 0;
+
+        // esperar RR ou REJ
+        while (alarmEnabled && state != 5) {
+            int res = read(g_fd, &byte, 1);
+            if (res <= 0) continue;
+
+            switch (state) {
+                case 0: // START
+                    if (byte == FLAG) state = 1;
+                    break;
+
+                case 1: // FLAG_RCV
+                    if (byte == A_TX) state = 2;
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 2: // A_RCV
+                    if (byte == C_RR0 || byte == C_RR1 || byte == C_REJ0 || byte == C_REJ1) {
+                        control = byte;
+                        state = 3;
+                    }
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 3: // C_RCV
+                    if (byte == (A_TX ^ control)) state = 4;
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 4: // BCC_OK
+                    if (byte == FLAG) state = 5;
+                    else state = 0;
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        alarm(0);
+
+        if (state == 5) {
+            if (control == C_REJ0 || control == C_REJ1) {
+                printf("REJ received -> retransmitting\n");
+                continue;
+            }
+
+            if (control == C_RR0 || control == C_RR1) {
+                printf("RR received -> success\n");
+                return frameSize;
+            }
+        }
+    }
+
+    printf("ERROR: frame not acknowledged\n");
     return -1;
 }
 
@@ -201,12 +329,310 @@ int llread(unsigned char *packet) {
     // TODO: ler frame I byte a byte (state machine)
     // TODO: destuffing, verificar BCC2
     // TODO: enviar RR ou REJ
-    return -1;
+
+    if (g_fd < 0) return -1;
+
+    unsigned char byte;
+    unsigned char data[2048];
+    int dataIndex = 0;
+
+    unsigned char address = 0;
+    unsigned char control = 0;
+
+    enum { START, FLAG_RCV, A_RCV, C_RCV, BCC1_OK, DATA_RCV, STOP } state = START;
+
+    while (state != STOP) {
+        int res = read(g_fd, &byte, 1);
+        if (res <= 0) continue;
+
+        switch (state) {
+            case START:
+                if (byte == FLAG) state = FLAG_RCV;
+                break;
+
+            case FLAG_RCV:
+                if (byte == A_TX) {
+                    address = byte;
+                    state = A_RCV;
+                }
+                else if (byte == FLAG) {
+                    state = FLAG_RCV;
+                }
+                else {
+                    state = START;
+                }
+                break;
+
+            case A_RCV:
+                if (byte == C_I0 || byte == C_I1) {
+                    control = byte;
+                    state = C_RCV;
+                }
+                else if (byte == FLAG) {
+                    state = FLAG_RCV;
+                }
+                else {
+                    state = START;
+                }
+                break;
+
+            case C_RCV:
+                if (byte == (address ^ control)) {
+                    state = BCC1_OK;
+                }
+                else if (byte == FLAG) {
+                    state = FLAG_RCV;
+                }
+                else {
+                    state = START;
+                }
+                break;
+
+            case BCC1_OK:
+                if (byte == FLAG) {
+                    state = START;
+                }
+                else {
+                    data[dataIndex++] = byte;
+                    state = DATA_RCV;
+                }
+                break;
+
+            case DATA_RCV:
+                if (byte == FLAG) {
+                    state = STOP;
+                }
+                else {
+                    data[dataIndex++] = byte;
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    // Tem de haver pelo menos 1 byte de BCC2
+    if (dataIndex < 1) {
+        return -1;
+    }
+
+    unsigned char received_bcc2 = data[dataIndex - 1];
+    unsigned char calculated_bcc2 = 0;
+
+    for (int i = 0; i < dataIndex - 1; i++) {
+        calculated_bcc2 ^= data[i];
+    }
+
+    if (calculated_bcc2 == received_bcc2) {
+        // Copiar payload para o packet
+        memcpy(packet, data, dataIndex - 1);
+
+        // Enviar RR
+        unsigned char rr_control = (control == C_I0) ? C_RR1 : C_RR0;
+        unsigned char rr_frame[5] = {FLAG, A_TX, rr_control, A_TX ^ rr_control, FLAG};
+        write(g_fd, rr_frame, 5);
+
+        printf("RR sent\n");
+        return dataIndex - 1;
+    }
+    else {
+        // Enviar REJ
+        unsigned char rej_control = (control == C_I0) ? C_REJ0 : C_REJ1;
+        unsigned char rej_frame[5] = {FLAG, A_TX, rej_control, A_TX ^ rej_control, FLAG};
+        write(g_fd, rej_frame, 5);
+
+        printf("REJ sent\n");
+        return -1;
+    }
 }
 
 int llclose(int showStatistics) {
-    // TODO: Tx -> envia DISC, espera DISC, envia UA
-    // TODO: Rx -> espera DISC, envia DISC, espera UA
-    // TODO: restaurar termios, close(fd)
-    return -1;
+    if (g_fd < 0) {
+        return -1;
+    }
+
+    int fd = g_fd;
+    unsigned char byte;
+    int state;
+
+    alarmCount = 0;
+
+    if (g_role == tx) {
+        // Tx sends DISC
+        unsigned char disc_frame[5] = {FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG};
+
+        while (alarmCount < g_nRetransmissions) {
+            write(fd, disc_frame, 5);
+            printf("DISC sent (%d/%d)\n", alarmCount + 1, g_nRetransmissions);
+
+            alarmEnabled = 1;
+            alarm(g_timeout);
+
+            state = 0; // START
+            while (alarmEnabled && state != 5) {
+                int res = read(fd, &byte, 1);
+                if (res <= 0) continue;
+
+                switch (state) {
+                    case 0: // START
+                        if (byte == FLAG) state = 1;
+                        break;
+
+                    case 1: // FLAG_RCV
+                        if (byte == A_RX) state = 2;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 2: // A_RCV
+                        if (byte == C_DISC) state = 3;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 3: // C_RCV
+                        if (byte == (A_RX ^ C_DISC)) state = 4;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 4: // BCC_OK
+                        if (byte == FLAG) state = 5;
+                        else state = 0;
+                        break;
+                }
+            }
+
+            alarm(0);
+            if (state == 5) {
+                break;
+            }
+        }
+
+        if (alarmCount >= g_nRetransmissions) {
+            fprintf(stderr, "ERROR: DISC not received after %d retransmissions\n", g_nRetransmissions);
+            tcsetattr(fd, TCSANOW, &oldtio);
+            close(fd);
+            g_fd = -1;
+            return -1;
+        }
+
+        // Tx sends UA
+        unsigned char ua_frame[5] = {FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
+        write(fd, ua_frame, 5);
+        printf("UA sent\n");
+    }
+    else {
+        // Rx waits for DISC from Tx
+        state = 0;
+        while (state != 5) {
+            int res = read(fd, &byte, 1);
+            if (res <= 0) continue;
+
+            switch (state) {
+                case 0:
+                    if (byte == FLAG) state = 1;
+                    break;
+
+                case 1:
+                    if (byte == A_TX) state = 2;
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 2:
+                    if (byte == C_DISC) state = 3;
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 3:
+                    if (byte == (A_TX ^ C_DISC)) state = 4;
+                    else if (byte == FLAG) state = 1;
+                    else state = 0;
+                    break;
+
+                case 4:
+                    if (byte == FLAG) state = 5;
+                    else state = 0;
+                    break;
+            }
+        }
+
+        printf("DISC received\n");
+
+        // Rx sends DISC
+        unsigned char disc_frame[5] = {FLAG, A_RX, C_DISC, A_RX ^ C_DISC, FLAG};
+
+        alarmCount = 0;
+        while (alarmCount < g_nRetransmissions) {
+            write(fd, disc_frame, 5);
+            printf("DISC sent (%d/%d)\n", alarmCount + 1, g_nRetransmissions);
+
+            alarmEnabled = 1;
+            alarm(g_timeout);
+
+            state = 0;
+            while (alarmEnabled && state != 5) {
+                int res = read(fd, &byte, 1);
+                if (res <= 0) continue;
+
+                switch (state) {
+                    case 0:
+                        if (byte == FLAG) state = 1;
+                        break;
+
+                    case 1:
+                        if (byte == A_RX) state = 2;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 2:
+                        if (byte == C_UA) state = 3;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 3:
+                        if (byte == (A_RX ^ C_UA)) state = 4;
+                        else if (byte == FLAG) state = 1;
+                        else state = 0;
+                        break;
+
+                    case 4:
+                        if (byte == FLAG) state = 5;
+                        else state = 0;
+                        break;
+                }
+            }
+
+            alarm(0);
+            if (state == 5) {
+                break;
+            }
+        }
+
+        if (alarmCount >= g_nRetransmissions) {
+            fprintf(stderr, "ERROR: UA not received after %d retransmissions\n", g_nRetransmissions);
+            tcsetattr(fd, TCSANOW, &oldtio);
+            close(fd);
+            g_fd = -1;
+            return -1;
+        }
+
+        printf("UA received - link closed\n");
+    }
+
+    alarm(0);
+    tcsetattr(fd, TCSANOW, &oldtio);
+    close(fd);
+    g_fd = -1;
+
+    if (showStatistics) {
+        printf("Link layer closed\n");
+    }
+
+    return 0;
 }

@@ -137,11 +137,8 @@ void set_baud_rate(unsigned long baud)
 
 // Make the program use RT priority to improve precision in timing
 void set_rt_priority(void) {
-    struct sched_param sp = { .sched_priority = 50 };
-    if (sched_setscheduler(0, SCHED_FIFO, &sp) == -1) {
-      perror("Could not set realtime priority");
+   // disabled on macos
     }
-}
 
 
 // Compute the difference between two timespecs
@@ -297,7 +294,7 @@ int main(int argc, char *argv[])
 
     set_baud_rate(DEFAULT_BAUDRATE);
 
-    set_rt_priority();
+    //set_rt_priority();
 
     // For logging
     char tx2rxTx[3], tx2rxRx[3], rx2txTx[3], rx2txRx[3];
