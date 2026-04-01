@@ -8,6 +8,11 @@
 #include <termios.h>
 #include <unistd.h>
 
+// Estado global da conexao (partilhado entre llopen/llwrite/llread/llclose)
+static int connFd = -1;
+static LinkLayer connParams;
+static struct termios oldtio; // para restaurar no llclose
+
 // Alarm
 static int alarmEnabled = 0;
 static int alarmCount = 0;
@@ -27,13 +32,21 @@ int llopen(LinkLayer connectionParameters) {
     act.sa_handler = &alarmHandler;
 
 
-    // Open serial port device for reading and writing, and not as controlling tty
-    // because we don't want to get killed if linenoise sends CTRL-C.
+    // Guardar parametros para as outras funcoes usarem
+    connParams = connectionParameters;
+
     int fd = open(connectionParameters.serialPort, O_RDWR | O_NOCTTY);
 
     if (fd < 0)
     {
         perror(connectionParameters.serialPort);
+        return -1;
+    }
+
+    // Guardar config antiga da porta serie (para restaurar no llclose)
+    if (tcgetattr(fd, &oldtio) == -1)
+    {
+        perror("tcgetattr");
         return -1;
     }
 
@@ -188,6 +201,7 @@ int llopen(LinkLayer connectionParameters) {
         printf("UA sent - connection established\n");
     }
 
+    connFd = fd; // guardar para llwrite/llread/llclose
     return fd;
 }
 
@@ -205,8 +219,158 @@ int llread(unsigned char *packet) {
 }
 
 int llclose(int showStatistics) {
-    // TODO: Tx -> envia DISC, espera DISC, envia UA
-    // TODO: Rx -> espera DISC, envia DISC, espera UA
-    // TODO: restaurar termios, close(fd)
-    return -1;
+    if (connFd < 0) return -1;
+
+    unsigned char byte;
+    enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state;
+
+    if (connParams.role == tx) {
+        // === TRANSMITTER ===
+        // 1) Envia DISC, espera DISC do receiver (com timer + retransmissoes)
+        unsigned char disc_frame[5] = {FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG};
+
+        state = START;
+        alarmCount = 0;
+
+        while (alarmCount < connParams.nRetransmissions && state != STOP) {
+            write(connFd, disc_frame, 5);
+            printf("DISC sent (%d/%d)\n", alarmCount + 1, connParams.nRetransmissions);
+
+            alarmEnabled = 1;
+            alarm(connParams.timeout);
+
+            while (alarmEnabled && state != STOP) {
+                int res = read(connFd, &byte, 1);
+                if (res <= 0) continue;
+
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == A_RX) state = A_RCV;
+                        else if (byte != FLAG) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == C_DISC) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (A_RX ^ C_DISC)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) state = STOP;
+                        else state = START;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        alarm(0);
+
+        if (state != STOP) {
+            printf("ERROR: DISC response not received\n");
+            return -1;
+        }
+
+        // 2) Recebeu DISC do receiver -> responde com UA
+        unsigned char ua_frame[5] = {FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
+        write(connFd, ua_frame, 5);
+        printf("UA sent - connection closed\n");
+
+    } else {
+        // === RECEIVER ===
+        // 1) Espera DISC do transmitter
+        state = START;
+
+        while (state != STOP) {
+            int res = read(connFd, &byte, 1);
+            if (res <= 0) continue;
+
+            switch (state) {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == A_TX) state = A_RCV;
+                    else if (byte != FLAG) state = START;
+                    break;
+                case A_RCV:
+                    if (byte == C_DISC) state = C_RCV;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case C_RCV:
+                    if (byte == (A_TX ^ C_DISC)) state = BCC_OK;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) state = STOP;
+                    else state = START;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        printf("DISC received\n");
+
+        // 2) Responde com DISC
+        unsigned char disc_frame[5] = {FLAG, A_RX, C_DISC, A_RX ^ C_DISC, FLAG};
+        write(connFd, disc_frame, 5);
+        printf("DISC sent\n");
+
+        // 3) Espera UA do transmitter
+        state = START;
+
+        while (state != STOP) {
+            int res = read(connFd, &byte, 1);
+            if (res <= 0) continue;
+
+            switch (state) {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == A_RX) state = A_RCV;
+                    else if (byte != FLAG) state = START;
+                    break;
+                case A_RCV:
+                    if (byte == C_UA) state = C_RCV;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case C_RCV:
+                    if (byte == (A_RX ^ C_UA)) state = BCC_OK;
+                    else if (byte == FLAG) state = FLAG_RCV;
+                    else state = START;
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) state = STOP;
+                    else state = START;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        printf("UA received - connection closed\n");
+    }
+
+    // Restaurar configuracao antiga da porta serie e fechar
+    if (tcsetattr(connFd, TCSANOW, &oldtio) == -1) {
+        perror("tcsetattr");
+        return -1;
+    }
+
+    close(connFd);
+    connFd = -1;
+
+    return 0;
 }

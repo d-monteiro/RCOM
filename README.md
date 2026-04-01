@@ -6,5 +6,3 @@ make
 ./bin/read /dev/ttyUSB0
 ./bin/cable
 ```
-
-GitHub: ruilopescampos (Partilhar)
