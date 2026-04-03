@@ -1,5 +1,4 @@
 #include "application.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +7,7 @@
 
 int application(const char *serialPort, const char *role, const char *filename) {
     LinkLayer ll;
+
     strcpy(ll.serialPort, serialPort);
     ll.role = (strcmp(role, "tx") == 0) ? tx : rx;
     ll.baudRate = 38400;
@@ -21,7 +21,6 @@ int application(const char *serialPort, const char *role, const char *filename) 
     }
 
     if (ll.role == tx) {
-        // Abrir ficheiro para leitura
         FILE *file = fopen(filename, "rb");
         if (file == NULL) {
             perror("fopen");
@@ -29,10 +28,20 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
+        fseek(file, 0, SEEK_END);
+        int fileSize = ftell(file);
+        rewind(file);
+
+        if (llwrite((unsigned char *)&fileSize, sizeof(int)) < 0) {
+            printf("failed to send file size\n");
+            fclose(file);
+            llclose(0);
+            return -1;
+        }
+
         unsigned char buffer[CHUNK_SIZE];
         int bytesRead;
 
-        // Ler ficheiro em bocados e enviar com llwrite
         while ((bytesRead = fread(buffer, 1, CHUNK_SIZE, file)) > 0) {
             if (llwrite(buffer, bytesRead) < 0) {
                 printf("llwrite failed\n");
@@ -43,10 +52,14 @@ int application(const char *serialPort, const char *role, const char *filename) 
         }
 
         fclose(file);
+
+        if (llclose(0) < 0) {
+            printf("llclose failed\n");
+            return -1;
+        }
+
         printf("File sent successfully\n");
-    }
-    else {
-        // Abrir ficheiro para escrita
+    } else {
         FILE *file = fopen(filename, "wb");
         if (file == NULL) {
             perror("fopen");
@@ -54,25 +67,44 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
-        unsigned char packet[CHUNK_SIZE];
-        int bytesRead;
+        int fileSize = 0;
+        if (llread((unsigned char *)&fileSize) <= 0) {
+            printf("failed to receive file size\n");
+            fclose(file);
+            llclose(0);
+            return -1;
+        }
 
-        // Receber dados com llread e escrever no ficheiro
-        while ((bytesRead = llread(packet)) > 0) {
-            fwrite(packet, 1, bytesRead, file);
+        unsigned char buffer[CHUNK_SIZE];
+        int totalRead = 0;
 
-            // Se vier menos que o chunk, assumimos fim do ficheiro
-            if (bytesRead < CHUNK_SIZE) {
-                break;
+        while (totalRead < fileSize) {
+            int bytesRead = llread(buffer);
+
+            if (bytesRead < 0) {
+                printf("llread failed\n");
+                fclose(file);
+                llclose(0);
+                return -1;
             }
+
+            if (bytesRead == 0) {
+                continue;
+            }
+
+            fwrite(buffer, 1, bytesRead, file);
+            totalRead += bytesRead;
         }
 
         fclose(file);
+
+        if (llclose(0) < 0) {
+            printf("llclose failed\n");
+            return -1;
+        }
+
         printf("File received successfully\n");
     }
-        // TODO: receber START packet, extrair nome e tamanho
-        // TODO: loop: receber DATA packets, escrever no ficheiro
-        // TODO: receber END packet
-    llclose(0);
+
     return 0;
 }
