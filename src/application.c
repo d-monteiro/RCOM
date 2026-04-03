@@ -28,17 +28,6 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
-        fseek(file, 0, SEEK_END);
-        int fileSize = ftell(file);
-        rewind(file);
-
-        if (llwrite((unsigned char *)&fileSize, sizeof(int)) < 0) {
-            printf("failed to send file size\n");
-            fclose(file);
-            llclose(0);
-            return -1;
-        }
-
         unsigned char buffer[CHUNK_SIZE];
         int bytesRead;
 
@@ -49,6 +38,14 @@ int application(const char *serialPort, const char *role, const char *filename) 
                 llclose(0);
                 return -1;
             }
+        }
+
+        // frame vazia = fim do ficheiro
+        if (llwrite(buffer, 0) < 0) {
+            printf("failed to send end marker\n");
+            fclose(file);
+            llclose(0);
+            return -1;
         }
 
         fclose(file);
@@ -67,18 +64,9 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
-        int fileSize = 0;
-        if (llread((unsigned char *)&fileSize) <= 0) {
-            printf("failed to receive file size\n");
-            fclose(file);
-            llclose(0);
-            return -1;
-        }
-
         unsigned char buffer[CHUNK_SIZE];
-        int totalRead = 0;
 
-        while (totalRead < fileSize) {
+        while (1) {
             int bytesRead = llread(buffer);
 
             if (bytesRead < 0) {
@@ -89,11 +77,11 @@ int application(const char *serialPort, const char *role, const char *filename) 
             }
 
             if (bytesRead == 0) {
-                continue;
+                // frame vazia = fim do ficheiro
+                break;
             }
 
             fwrite(buffer, 1, bytesRead, file);
-            totalRead += bytesRead;
         }
 
         fclose(file);
