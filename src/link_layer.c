@@ -414,6 +414,21 @@ int llread(unsigned char *packet) {
                 if (byte == FLAG) {
                     state = START;
                 }
+                else if (byte == ESC) {
+                    int res = read(g_fd, &byte, 1);
+                    if (res <= 0) {
+                        state = BCC1_OK;
+                        break;
+                    }
+                    if (byte == 0x5E) {
+                        data[dataIndex++] = FLAG;
+                    } else if (byte == 0x5D) {
+                        data[dataIndex++] = ESC;
+                    } else {
+                        data[dataIndex++] = byte;
+                    }
+                    state = DATA_RCV;
+                }
                 else {
                     data[dataIndex++] = byte;
                     state = DATA_RCV;
@@ -437,7 +452,7 @@ int llread(unsigned char *packet) {
                     } else if (byte == 0x5D) {
                         data[dataIndex++] = ESC;
                     } else {
-                        // Invalid escape sequence, but continue
+                        // Invalid escape sequence; keep raw byte as fallback
                         data[dataIndex++] = byte;
                     }
                 }
@@ -487,7 +502,7 @@ int llread(unsigned char *packet) {
             write(g_fd, rr_frame, 5);
 
             printf("RR sent (duplicate)\n");
-            return -1; // Indicate duplicate, but application should ignore
+            return 0; // Duplicate frame: ignore at application level without treating as error
         }
     }
     else {
