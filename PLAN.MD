@@ -197,10 +197,10 @@ newtio.c_iflag = IGNPAR;     // Ignora erros de paridade
 newtio.c_oflag = 0;          // Sem processamento de output
 newtio.c_lflag = 0;          // Modo NÃO canónico (lê bytes crus, não linhas)
 newtio.c_cc[VTIME] = 0;     // Sem timeout entre chars
-newtio.c_cc[VMIN] = 0;      // read() não bloqueia (retorna 0 se não há dados)
+newtio.c_cc[VMIN] = 1;      // read() não bloqueia (retorna 0 se não há dados)
 ```
 
-Usar modo **não-canónico** e **VMIN=0** para ler byte a byte sem bloquear.
+Usar modo **não-canónico** e **VMIN=1** para ler byte a byte sem bloquear.
 
 ---
 
