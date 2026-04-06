@@ -18,6 +18,12 @@ static int g_nRetransmissions = 3;
 static int alarmEnabled = 0;
 static int alarmCount = 0;
 
+// Sequence number for frames
+static int seq_num = 0;
+
+// Expected sequence for receiver
+static int expected_seq = 0;
+
 static void alarmHandler(int signal) {
     alarmEnabled = 0;
     alarmCount++;
@@ -223,31 +229,44 @@ int llopen(LinkLayer connectionParameters) {
 
   
 int llwrite(const unsigned char *buf, int bufSize) {
-    // TODO: construir frame I (header + stuffing + BCC2)
-    // TODO: enviar frame, esperar RR/REJ (com timer + retransmissoes) 
     if (g_fd < 0) return -1;
 
     unsigned char frame[2048];
     int frameSize = 0;
 
-    unsigned char byte;
-    unsigned char control = 0;
-    int state;
+    unsigned char control = (seq_num % 2 == 0) ? C_I0 : C_I1;
 
     // === HEADER ===
     frame[frameSize++] = FLAG;
     frame[frameSize++] = A_TX;
-    frame[frameSize++] = C_I0;          // por agora envia sempre I0
-    frame[frameSize++] = A_TX ^ C_I0;   // BCC1
+    frame[frameSize++] = control;
+    frame[frameSize++] = A_TX ^ control;   // BCC1
 
-    // === DATA + BCC2 ===
+    // === DATA + STUFFING ===
     unsigned char bcc2 = 0;
     for (int i = 0; i < bufSize; i++) {
-        frame[frameSize++] = buf[i];
         bcc2 ^= buf[i];
+        if (buf[i] == FLAG) {
+            frame[frameSize++] = ESC;
+            frame[frameSize++] = 0x5E;
+        } else if (buf[i] == ESC) {
+            frame[frameSize++] = ESC;
+            frame[frameSize++] = 0x5D;
+        } else {
+            frame[frameSize++] = buf[i];
+        }
     }
 
-    frame[frameSize++] = bcc2;
+    // Stuff BCC2
+    if (bcc2 == FLAG) {
+        frame[frameSize++] = ESC;
+        frame[frameSize++] = 0x5E;
+    } else if (bcc2 == ESC) {
+        frame[frameSize++] = ESC;
+        frame[frameSize++] = 0x5D;
+    } else {
+        frame[frameSize++] = bcc2;
+    }
 
     // === END FLAG ===
     frame[frameSize++] = FLAG;
@@ -257,13 +276,14 @@ int llwrite(const unsigned char *buf, int bufSize) {
     while (alarmCount < g_nRetransmissions) {
         // enviar frame I
         write(g_fd, frame, frameSize);
-        printf("I frame sent (%d/%d)\n", alarmCount + 1, g_nRetransmissions);
+        printf("I frame sent (seq %d, %d/%d)\n", seq_num % 2, alarmCount + 1, g_nRetransmissions);
 
         alarmEnabled = 1;
         alarm(g_timeout);
 
-        state = 0;
-        control = 0;
+        int state = 0;
+        unsigned char byte;
+        unsigned char resp_control = 0;
 
         // esperar RR ou REJ
         while (alarmEnabled && state != 5) {
@@ -283,7 +303,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
 
                 case 2: // A_RCV
                     if (byte == C_RR0 || byte == C_RR1 || byte == C_REJ0 || byte == C_REJ1) {
-                        control = byte;
+                        resp_control = byte;
                         state = 3;
                     }
                     else if (byte == FLAG) state = 1;
@@ -291,7 +311,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
                     break;
 
                 case 3: // C_RCV
-                    if (byte == (A_TX ^ control)) state = 4;
+                    if (byte == (A_TX ^ resp_control)) state = 4;
                     else if (byte == FLAG) state = 1;
                     else state = 0;
                     break;
@@ -309,13 +329,15 @@ int llwrite(const unsigned char *buf, int bufSize) {
         alarm(0);
 
         if (state == 5) {
-            if (control == C_REJ0 || control == C_REJ1) {
+            if (resp_control == C_REJ0 || resp_control == C_REJ1) {
                 printf("REJ received -> retransmitting\n");
                 continue;
             }
 
-            if (control == C_RR0 || control == C_RR1) {
+            unsigned char expected_rr = (seq_num % 2 == 0) ? C_RR1 : C_RR0;
+            if (resp_control == expected_rr) {
                 printf("RR received -> success\n");
+                seq_num++;
                 return frameSize;
             }
         }
@@ -326,10 +348,6 @@ int llwrite(const unsigned char *buf, int bufSize) {
 }
 
 int llread(unsigned char *packet) {
-    // TODO: ler frame I byte a byte (state machine)
-    // TODO: destuffing, verificar BCC2
-    // TODO: enviar RR ou REJ
-
     if (g_fd < 0) return -1;
 
     unsigned char byte;
@@ -338,6 +356,7 @@ int llread(unsigned char *packet) {
 
     unsigned char address = 0;
     unsigned char control = 0;
+    int escape_pending = 0;
 
     enum { START, FLAG_RCV, A_RCV, C_RCV, BCC1_OK, DATA_RCV, STOP } state = START;
 
@@ -393,7 +412,12 @@ int llread(unsigned char *packet) {
                     state = START;
                 }
                 else {
-                    data[dataIndex++] = byte;
+                    // Start reading frame data (destuffing handled in DATA_RCV)
+                    if (byte == ESC) {
+                        escape_pending = 1;
+                    } else {
+                        data[dataIndex++] = byte;
+                    }
                     state = DATA_RCV;
                 }
                 break;
@@ -401,6 +425,21 @@ int llread(unsigned char *packet) {
             case DATA_RCV:
                 if (byte == FLAG) {
                     state = STOP;
+                }
+                else if (escape_pending) {
+                    if (byte == 0x5E) {
+                        data[dataIndex++] = FLAG;
+                    } else if (byte == 0x5D) {
+                        data[dataIndex++] = ESC;
+                    } else {
+                        // Invalid, but continue
+                        data[dataIndex++] = byte;
+                    }
+                    escape_pending = 0;
+                }
+                else if (byte == ESC) {
+                    // Next byte is stuffed
+                    escape_pending = 1;
                 }
                 else {
                     data[dataIndex++] = byte;
@@ -412,33 +451,51 @@ int llread(unsigned char *packet) {
         }
     }
 
-    // Tem de haver pelo menos 1 byte de BCC2
+    // Remove BCC2 from data
     if (dataIndex < 1) {
         return -1;
     }
-
-    unsigned char received_bcc2 = data[dataIndex - 1];
+    unsigned char received_bcc2 = data[--dataIndex];
     unsigned char calculated_bcc2 = 0;
 
-    for (int i = 0; i < dataIndex - 1; i++) {
+    for (int i = 0; i < dataIndex; i++) {
         calculated_bcc2 ^= data[i];
     }
 
+    int frame_seq = (control == C_I0) ? 0 : 1;
+
     if (calculated_bcc2 == received_bcc2) {
-        // Copiar payload para o packet
-        memcpy(packet, data, dataIndex - 1);
+        if (frame_seq == expected_seq) {
+            // New frame
+            memcpy(packet, data, dataIndex);
+            expected_seq = 1 - expected_seq;
 
-        // Enviar RR
-        unsigned char rr_control = (control == C_I0) ? C_RR1 : C_RR0;
-        unsigned char rr_frame[5] = {FLAG, A_TX, rr_control, A_TX ^ rr_control, FLAG};
-        write(g_fd, rr_frame, 5);
+            // Send RR
+            unsigned char rr_control = (expected_seq == 0) ? C_RR0 : C_RR1;
+            unsigned char rr_frame[5] = {FLAG, A_TX, rr_control, A_TX ^ rr_control, FLAG};
+            write(g_fd, rr_frame, 5);
 
-        printf("RR sent\n");
-        return dataIndex - 1;
+            printf("RR sent (new frame)\n");
+            return dataIndex;
+        } else {
+            // Duplicate
+            printf("Duplicate frame received, discarding\n");
+
+            // Send RR for expected
+            unsigned char rr_control = (expected_seq == 0) ? C_RR0 : C_RR1;
+            unsigned char rr_frame[5] = {FLAG, A_TX, rr_control, A_TX ^ rr_control, FLAG};
+            write(g_fd, rr_frame, 5);
+
+            printf("RR sent (duplicate)\n");
+            return -1; // Indicate duplicate, but application should ignore
+        }
     }
     else {
-        // Enviar REJ
-        unsigned char rej_control = (control == C_I0) ? C_REJ0 : C_REJ1;
+        // BCC2 error
+        printf("BCC2 error\n");
+
+        // Send REJ
+        unsigned char rej_control = (expected_seq == 0) ? C_REJ0 : C_REJ1;
         unsigned char rej_frame[5] = {FLAG, A_TX, rej_control, A_TX ^ rej_control, FLAG};
         write(g_fd, rej_frame, 5);
 
