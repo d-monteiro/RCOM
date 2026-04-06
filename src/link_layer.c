@@ -78,7 +78,7 @@ int llopen(LinkLayer connectionParameters) {
     // Set input mode (non-canonical, no echo,...)
     newtio.c_lflag = 0;
     newtio.c_cc[VTIME] = 0; // Inter-character timer unused
-    newtio.c_cc[VMIN] = 0;  // Read without blocking
+    newtio.c_cc[VMIN] = 1;  // Read without blocking
 
     // VTIME e VMIN should be changed in order to protect with a
     // timeout the reception of the following character(s)
@@ -331,6 +331,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
         if (state == 5) {
             if (resp_control == C_REJ0 || resp_control == C_REJ1) {
                 printf("REJ received -> retransmitting\n");
+                alarmCount++;
                 continue;
             }
 
@@ -340,6 +341,9 @@ int llwrite(const unsigned char *buf, int bufSize) {
                 seq_num++;
                 return frameSize;
             }
+
+            // unexpected supervisory frame
+            alarmCount++;
         }
     }
 
@@ -356,7 +360,6 @@ int llread(unsigned char *packet) {
 
     unsigned char address = 0;
     unsigned char control = 0;
-    int escape_pending = 0;
 
     enum { START, FLAG_RCV, A_RCV, C_RCV, BCC1_OK, DATA_RCV, STOP } state = START;
 
@@ -412,12 +415,7 @@ int llread(unsigned char *packet) {
                     state = START;
                 }
                 else {
-                    // Start reading frame data (destuffing handled in DATA_RCV)
-                    if (byte == ESC) {
-                        escape_pending = 1;
-                    } else {
-                        data[dataIndex++] = byte;
-                    }
+                    data[dataIndex++] = byte;
                     state = DATA_RCV;
                 }
                 break;
@@ -426,20 +424,22 @@ int llread(unsigned char *packet) {
                 if (byte == FLAG) {
                     state = STOP;
                 }
-                else if (escape_pending) {
+                else if (byte == ESC) {
+                    // Next byte is stuffed - read it immediately
+                    int res = read(g_fd, &byte, 1);
+                    if (res <= 0) {
+                        // No byte available, retry this state
+                        state = DATA_RCV;
+                        break;
+                    }
                     if (byte == 0x5E) {
                         data[dataIndex++] = FLAG;
                     } else if (byte == 0x5D) {
                         data[dataIndex++] = ESC;
                     } else {
-                        // Invalid, but continue
+                        // Invalid escape sequence, but continue
                         data[dataIndex++] = byte;
                     }
-                    escape_pending = 0;
-                }
-                else if (byte == ESC) {
-                    // Next byte is stuffed
-                    escape_pending = 1;
                 }
                 else {
                     data[dataIndex++] = byte;
