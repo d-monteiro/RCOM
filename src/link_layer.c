@@ -33,6 +33,8 @@ int llopen(LinkLayer connectionParameters) {
     g_role = connectionParameters.role;
     g_timeout = connectionParameters.timeout;
     g_nRetransmissions = connectionParameters.nRetransmissions;
+    seq_num = 0;
+    expected_seq = 0;
 
     // TODO: abrir porta serie, configurar termios
     // TODO: Tx -> envia SET, espera UA (com timer)
@@ -247,28 +249,35 @@ int llwrite(const unsigned char *buf, int bufSize) {
     for (int i = 0; i < bufSize; i++) {
         bcc2 ^= buf[i];
         if (buf[i] == FLAG) {
+            if (frameSize + 2 >= (int)sizeof(frame)) return -1;
             frame[frameSize++] = ESC;
             frame[frameSize++] = 0x5E;
         } else if (buf[i] == ESC) {
+            if (frameSize + 2 >= (int)sizeof(frame)) return -1;
             frame[frameSize++] = ESC;
             frame[frameSize++] = 0x5D;
         } else {
+            if (frameSize + 1 >= (int)sizeof(frame)) return -1;
             frame[frameSize++] = buf[i];
         }
     }
 
     // Stuff BCC2
     if (bcc2 == FLAG) {
+        if (frameSize + 2 >= (int)sizeof(frame)) return -1;
         frame[frameSize++] = ESC;
         frame[frameSize++] = 0x5E;
     } else if (bcc2 == ESC) {
+        if (frameSize + 2 >= (int)sizeof(frame)) return -1;
         frame[frameSize++] = ESC;
         frame[frameSize++] = 0x5D;
     } else {
+        if (frameSize + 1 >= (int)sizeof(frame)) return -1;
         frame[frameSize++] = bcc2;
     }
 
     // === END FLAG ===
+    if (frameSize + 1 >= (int)sizeof(frame)) return -1;
     frame[frameSize++] = FLAG;
 
     alarmCount = 0;
@@ -421,15 +430,19 @@ int llread(unsigned char *packet) {
                         break;
                     }
                     if (byte == 0x5E) {
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = FLAG;
                     } else if (byte == 0x5D) {
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = ESC;
                     } else {
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = byte;
                     }
                     state = DATA_RCV;
                 }
                 else {
+                    if (dataIndex >= (int)sizeof(data)) return -1;
                     data[dataIndex++] = byte;
                     state = DATA_RCV;
                 }
@@ -448,15 +461,19 @@ int llread(unsigned char *packet) {
                         break;
                     }
                     if (byte == 0x5E) {
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = FLAG;
                     } else if (byte == 0x5D) {
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = ESC;
                     } else {
                         // Invalid escape sequence; keep raw byte as fallback
+                        if (dataIndex >= (int)sizeof(data)) return -1;
                         data[dataIndex++] = byte;
                     }
                 }
                 else {
+                    if (dataIndex >= (int)sizeof(data)) return -1;
                     data[dataIndex++] = byte;
                 }
                 break;

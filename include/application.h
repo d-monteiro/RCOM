@@ -4,9 +4,9 @@
 #include "link_layer.h"
 
 // Packet types
-#define PACKET_START 1
-#define PACKET_END 2
-#define PACKET_DATA 3
+#define PACKET_DATA 1
+#define PACKET_START 2
+#define PACKET_END 3
 
 // TLV types
 #define TLV_SIZE 0

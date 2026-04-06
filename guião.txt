@@ -1,0 +1,166 @@
+RCOM LAB 1 — GUIÃO RESUMO
+
+OBJETIVO  
+Transferir um ficheiro entre dois PCs usando porta série (RS-232), implementando um protocolo Stop-and-Wait em C no Linux.
+
+----------------------------------------
+
+ARQUITETURA
+
+Application Layer  
+- Lê ficheiro  
+- Divide em chunks  
+- Cria packets (START, DATA, END)  
+
+Data Link Layer  
+- Envia frames pela serial  
+- Garante fiabilidade (RR/REJ, retransmissões)  
+
+----------------------------------------
+
+DATA LINK LAYER (DLL)
+
+FRAMES
+
+Supervisão (sem dados):
+SET  = 0x03 → abrir ligação  
+UA   = 0x07 → confirmação  
+DISC = 0x0B → fechar ligação  
+RR0  = 0x05 → pronto para frame 0  
+RR1  = 0x85 → pronto para frame 1  
+REJ0 = 0x01 → erro frame 0  
+REJ1 = 0x81 → erro frame 1  
+
+Formato:
+[FLAG][A][C][BCC1][FLAG]
+
+----------------------------------------
+
+Frames de Informação (I)
+
+Formato:
+[FLAG][A][C][BCC1][DATA][BCC2][FLAG]
+
+FLAG = 0x7E  
+A_TX = 0x03  
+A_RX = 0x01  
+
+C:
+I0 = 0x00  
+I1 = 0x40  
+
+BCC1 = A XOR C  
+BCC2 = XOR de todos os bytes de DATA  
+
+----------------------------------------
+
+STOP-AND-WAIT
+
+- Transmitter envia 1 frame  
+- Espera resposta (RR ou REJ)  
+- Se RR → envia próxima  
+- Se REJ → retransmite  
+- Se timeout → retransmite  
+
+----------------------------------------
+
+BYTE STUFFING
+
+Se aparecer nos dados:
+0x7E → 0x7D 0x5E  
+0x7D → 0x7D 0x5D  
+
+- BCC2 é calculado antes do stuffing  
+- Destuffing feito antes de verificar BCC2  
+
+----------------------------------------
+
+RECEIVER
+
+- BCC1 errado → ignora frame  
+- Frame duplicada → envia RR  
+- BCC2 errado → envia REJ  
+- Frame correta → envia RR e entrega dados  
+
+----------------------------------------
+
+APPLICATION LAYER
+
+PACKETS
+
+START (C = 2)  
+END   (C = 3)  
+DATA  (C = 1)  
+
+----------------------------------------
+
+START / END PACKET (TLV)
+
+[C][T][L][V]...
+
+T=0 → tamanho ficheiro  
+T=1 → nome ficheiro  
+
+----------------------------------------
+
+DATA PACKET
+
+[C][L2][L1][DATA]
+
+tamanho = L2*256 + L1  
+
+----------------------------------------
+
+FLUXO
+
+Transmitter:
+1. llopen()  
+2. enviar START  
+3. enviar vários DATA  
+4. enviar END  
+5. llclose()  
+
+Receiver:
+1. llopen()  
+2. receber START  
+3. receber DATA (loop)  
+4. receber END  
+5. llclose()  
+
+----------------------------------------
+
+API
+
+llopen()  → abre ligação  
+llwrite() → envia frame I  
+llread()  → recebe frame I  
+llclose() → fecha ligação  
+
+----------------------------------------
+
+CONFIGURAÇÃO SERIAL
+
+- modo não-canónico  
+- leitura byte a byte  
+- VMIN = 1  
+- VTIME = 0  
+
+----------------------------------------
+
+NOTAS IMPORTANTES
+
+- usar alternância I0 / I1  
+- tratar duplicados  
+- implementar timeout + retransmissões  
+- garantir que ficheiro recebido é igual ao original  
+- testar com ficheiros binários (.gif)  
+
+----------------------------------------
+
+OBJETIVO FINAL
+
+- ligação abre corretamente  
+- ficheiro é transferido sem erros  
+- ligação fecha corretamente  
+
+----------------------------------------
