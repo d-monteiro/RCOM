@@ -13,6 +13,7 @@
 #define TLV_NAME 1
 
 // (tx ou rx)
-int application(const char *serialPort, const char *role, const char *filename);
+int application(const char *serialPort, const char *role, const char *filename,
+                double fer, int tprop, int frameSize);
 
 #endif

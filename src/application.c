@@ -3,8 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
-#define CHUNK_SIZE 256
+#define MAX_CHUNK_SIZE 1024
 
 // Get file size
 long get_file_size(const char *filename) {
@@ -85,19 +86,43 @@ int parse_data_packet(const unsigned char *packet, int packetsize, unsigned char
     int datasize = (packet[1] << 8) | packet[2];
     // Validate datasize is within packet bounds and within CHUNK_SIZE
     if (packetsize != 3 + datasize) return -1;
-    if (datasize > CHUNK_SIZE) return -1; // Safety check
+    if (datasize > MAX_CHUNK_SIZE) return -1; // Safety check
     if (datasize == 0) return 0; // Empty data is valid
     memcpy(data, &packet[3], datasize);
     return datasize;
 }
 
-int application(const char *serialPort, const char *role, const char *filename) {
+void print_progress(long current, long total) {
+    if (total <= 0) return;
+    int percent = (int)(current * 100 / total);
+    if (percent > 100) percent = 100;
+    int bar_width = 50;
+    int filled = percent * bar_width / 100;
+
+    printf("\r[");
+    int i;
+    for (i = 0; i < filled; i++) printf("=");
+    if (filled < bar_width) printf(">");
+    for (i = filled + 1; i < bar_width; i++) printf(" ");
+    printf("] %d%% (%ld/%ld bytes)", percent, current, total);
+    fflush(stdout);
+}
+
+int application(const char *serialPort, const char *role, const char *filename,
+                double fer, int tprop, int frameSize) {
     LinkLayer ll;
     strcpy(ll.serialPort, serialPort);
-    ll.role = (strcmp(role, "tx") == 0) ? tx : rx;
+    if (strcmp(role, "tx") == 0) {
+        ll.role = tx;
+    } else {
+        ll.role = rx;
+    }
     ll.baudRate = 38400;
     ll.nRetransmissions = 3;
     ll.timeout = 3;
+    ll.fer = fer;
+    ll.tprop = tprop;
+    ll.frameSize = frameSize;
 
     int fd = llopen(ll);
     if (fd < 0) {
@@ -130,19 +155,27 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
+        // timing
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
         // Send DATA packets
-        unsigned char buffer[CHUNK_SIZE];
+        unsigned char buffer[MAX_CHUNK_SIZE];
         int bytesRead;
-        while ((bytesRead = fread(buffer, 1, CHUNK_SIZE, file)) > 0) {
-            unsigned char data_packet[1024];
-            int packet_size = create_data_packet(data_packet, buffer, bytesRead, 0); // seq not used
+        long bytes_sent = 0;
+        while ((bytesRead = fread(buffer, 1, frameSize, file)) > 0) {
+            unsigned char data_packet[2048];
+            int packet_size = create_data_packet(data_packet, buffer, bytesRead, 0);
             if (llwrite(data_packet, packet_size) < 0) {
                 printf("Failed to send DATA\n");
                 fclose(file);
                 llclose(0);
                 return -1;
             }
+            bytes_sent += bytesRead;
+            print_progress(bytes_sent, filesize);
         }
+        printf("\n");
 
         // Send END
         unsigned char end_packet[1024];
@@ -156,12 +189,34 @@ int application(const char *serialPort, const char *role, const char *filename) 
 
         fclose(file);
 
-        if (llclose(0) < 0) {
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+
+        if (llclose(1) < 0) {
             printf("llclose failed\n");
             return -1;
         }
 
-        printf("File sent successfully\n");
+        // stats de eficiencia
+        double R = 0;
+        if (elapsed > 0) {
+            R = (filesize * 8.0) / elapsed;
+        }
+        double C = ll.baudRate;
+        double S = R / C;
+
+        printf("\n=== Transfer Statistics ===\n");
+        printf("File size: %ld bytes\n", filesize);
+        printf("Transfer time: %.2f seconds\n", elapsed);
+        printf("Effective bitrate (R): %.0f bit/s\n", R);
+        printf("Link capacity (C): %d bit/s\n", ll.baudRate);
+        printf("Efficiency (S = R/C): %.4f\n", S);
+        printf("\n=== Test Parameters ===\n");
+        printf("FER: %.2f\n", fer);
+        printf("T_prop: %d ms\n", tprop);
+        printf("Frame size: %d bytes\n", frameSize);
+
+        printf("\nFile sent successfully\n");
     } else {
         unsigned char packet[1024];
         int packet_size;
@@ -203,12 +258,16 @@ int application(const char *serialPort, const char *role, const char *filename) 
             return -1;
         }
 
+        // timing
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        long bytes_received = 0;
+
         // Read DATA packets
         int read_errors = 0;
         while (1) {
             packet_size = llread(packet);
             if (packet_size < 0) {
-                // Error or duplicate, increment counter but continue
                 read_errors++;
                 if (read_errors > 100) {
                     printf("Too many read errors\n");
@@ -219,36 +278,60 @@ int application(const char *serialPort, const char *role, const char *filename) 
                 continue;
             }
 
-            read_errors = 0; // Reset error counter on successful read
+            read_errors = 0;
 
             if (packet_size == 0) {
-                printf("Empty packet received\n");
                 continue;
             }
 
             if (packet[0] == PACKET_DATA) {
-                unsigned char data[CHUNK_SIZE];
+                unsigned char data[MAX_CHUNK_SIZE];
                 int datasize = parse_data_packet(packet, packet_size, data);
                 if (datasize < 0) {
                     printf("Invalid DATA packet\n");
                     continue;
                 }
                 fwrite(data, 1, datasize, file);
+                bytes_received += datasize;
+                print_progress(bytes_received, recv_filesize);
             } else if (packet[0] == PACKET_END) {
                 break;
             } else {
                 printf("Unexpected packet type: %d\n", packet[0]);
             }
         }
+        printf("\n");
 
         fclose(file);
 
-        if (llclose(0) < 0) {
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+
+        if (llclose(1) < 0) {
             printf("llclose failed\n");
             return -1;
         }
 
-        printf("File received successfully\n");
+        // stats de eficiencia
+        double R = 0;
+        if (elapsed > 0) {
+            R = (bytes_received * 8.0) / elapsed;
+        }
+        double C = ll.baudRate;
+        double S = R / C;
+
+        printf("\n=== Transfer Statistics ===\n");
+        printf("File size: %ld bytes (received: %ld)\n", recv_filesize, bytes_received);
+        printf("Transfer time: %.2f seconds\n", elapsed);
+        printf("Effective bitrate (R): %.0f bit/s\n", R);
+        printf("Link capacity (C): %d bit/s\n", ll.baudRate);
+        printf("Efficiency (S = R/C): %.4f\n", S);
+        printf("\n=== Test Parameters ===\n");
+        printf("FER: %.2f\n", fer);
+        printf("T_prop: %d ms\n", tprop);
+        printf("Frame size: %d bytes\n", frameSize);
+
+        printf("\nFile received successfully\n");
     }
 
     return 0;

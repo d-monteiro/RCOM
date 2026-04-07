@@ -24,6 +24,13 @@ static int seq_num = 0;
 // Expected sequence for receiver
 static int expected_seq = 0;
 
+// Stats
+static LinkLayerStats g_stats;
+
+// Simulacao
+static double g_fer = 0.0;
+static int g_tprop = 0;
+
 static void alarmHandler(int signal) {
     alarmEnabled = 0;
     alarmCount++;
@@ -35,6 +42,9 @@ int llopen(LinkLayer connectionParameters) {
     g_nRetransmissions = connectionParameters.nRetransmissions;
     seq_num = 0;
     expected_seq = 0;
+    memset(&g_stats, 0, sizeof(g_stats));
+    g_fer = connectionParameters.fer;
+    g_tprop = connectionParameters.tprop;
 
     // TODO: abrir porta serie, configurar termios
     // TODO: Tx -> envia SET, espera UA (com timer)
@@ -285,6 +295,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
     while (alarmCount < g_nRetransmissions) {
         // enviar frame I
         write(g_fd, frame, frameSize);
+        g_stats.frames_sent++;
         printf("I frame sent (seq %d, %d/%d)\n", seq_num % 2, alarmCount + 1, g_nRetransmissions);
 
         alarmEnabled = 1;
@@ -340,6 +351,8 @@ int llwrite(const unsigned char *buf, int bufSize) {
         if (state == 5) {
             if (resp_control == C_REJ0 || resp_control == C_REJ1) {
                 printf("REJ received -> retransmitting\n");
+                g_stats.rej_received++;
+                g_stats.retransmissions++;
                 alarmCount++;
                 continue;
             }
@@ -353,6 +366,11 @@ int llwrite(const unsigned char *buf, int bufSize) {
 
             // unexpected supervisory frame
             alarmCount++;
+        }
+        else {
+            // timeout
+            g_stats.timeouts++;
+            g_stats.retransmissions++;
         }
     }
 
@@ -483,6 +501,11 @@ int llread(unsigned char *packet) {
         }
     }
 
+    // simular propagation delay
+    if (g_tprop > 0) {
+        usleep(g_tprop * 1000);
+    }
+
     // Remove BCC2 from data
     if (dataIndex < 1) {
         return -1;
@@ -498,12 +521,33 @@ int llread(unsigned char *packet) {
 
     if (calculated_bcc2 == received_bcc2) {
         if (frame_seq == expected_seq) {
+            // simular FER - fingir que houve erro
+            if (g_fer > 0.0 && (double)rand() / RAND_MAX < g_fer) {
+                printf("FER simulation: frame rejected\n");
+                unsigned char rej_control;
+                if (expected_seq == 0) {
+                    rej_control = C_REJ0;
+                } else {
+                    rej_control = C_REJ1;
+                }
+                unsigned char rej_frame[5] = {FLAG, A_TX, rej_control, A_TX ^ rej_control, FLAG};
+                write(g_fd, rej_frame, 5);
+                g_stats.rej_sent++;
+                return -1;
+            }
+
             // New frame
             memcpy(packet, data, dataIndex);
             expected_seq = 1 - expected_seq;
+            g_stats.frames_received++;
 
             // Send RR
-            unsigned char rr_control = (expected_seq == 0) ? C_RR0 : C_RR1;
+            unsigned char rr_control;
+            if (expected_seq == 0) {
+                rr_control = C_RR0;
+            } else {
+                rr_control = C_RR1;
+            }
             unsigned char rr_frame[5] = {FLAG, A_TX, rr_control, A_TX ^ rr_control, FLAG};
             write(g_fd, rr_frame, 5);
 
@@ -527,9 +571,15 @@ int llread(unsigned char *packet) {
         printf("BCC2 error\n");
 
         // Send REJ
-        unsigned char rej_control = (expected_seq == 0) ? C_REJ0 : C_REJ1;
+        unsigned char rej_control;
+        if (expected_seq == 0) {
+            rej_control = C_REJ0;
+        } else {
+            rej_control = C_REJ1;
+        }
         unsigned char rej_frame[5] = {FLAG, A_TX, rej_control, A_TX ^ rej_control, FLAG};
         write(g_fd, rej_frame, 5);
+        g_stats.rej_sent++;
 
         printf("REJ sent\n");
         return -1;
@@ -720,8 +770,18 @@ int llclose(int showStatistics) {
     g_fd = -1;
 
     if (showStatistics) {
-        printf("Link layer closed\n");
+        printf("\n=== Link Layer Statistics ===\n");
+        printf("Frames sent: %d\n", g_stats.frames_sent);
+        printf("Frames received: %d\n", g_stats.frames_received);
+        printf("Retransmissions: %d\n", g_stats.retransmissions);
+        printf("Timeouts: %d\n", g_stats.timeouts);
+        printf("REJs sent: %d\n", g_stats.rej_sent);
+        printf("REJs received: %d\n", g_stats.rej_received);
     }
 
     return 0;
+}
+
+LinkLayerStats llget_stats(void) {
+    return g_stats;
 }

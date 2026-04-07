@@ -24,7 +24,19 @@ typedef struct {
     int baudRate;
     int nRetransmissions;
     int timeout;
+    double fer;        // frame error rate (0.0 a 1.0)
+    int tprop;         // propagation delay em ms
+    int frameSize;     // tamanho de dados por frame
 } LinkLayer;
+
+typedef struct {
+    int frames_sent;
+    int frames_received;
+    int retransmissions;
+    int timeouts;
+    int rej_sent;
+    int rej_received;
+} LinkLayerStats;
 
 // Abre conexao. Retorna fd, ou -1 em erro.
 int llopen(LinkLayer connectionParameters);
@@ -37,5 +49,8 @@ int llread(unsigned char *packet);
 
 // Fecha conexao. Retorna 0 ok, -1 erro.
 int llclose(int showStatistics);
+
+// Retorna stats da link layer
+LinkLayerStats llget_stats(void);
 
 #endif
